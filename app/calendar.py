@@ -95,28 +95,17 @@ class Calendar:
             
             return cursor.fetchall()
 
-    def edit_event(self, user_id: int, event_name: str, new_date=None, new_description=None) -> None:
-        """Метод для ИЗМЕНЕНИЯ строк таблицы events по имени события и ID пользователя."""
+    def update_event_by_id(self, event_id: int, user_id: int, new_name: str, new_date: date, new_time: time) -> None:
+        """Обновляет все поля конкретной заметки по её уникальному id СУБД."""
         with self.conn.cursor() as cursor:
-            # 1. Если передана новая дата, обновляем её в базе данных для текущего пользователя
-            if new_date is not None:
-                cursor.execute("""
-                    UPDATE events 
-                    SET date = %s 
-                    WHERE name = %s AND user_id = %s;
-                """, (new_date, event_name, user_id))
-                
-            # 2. Если передано новое описание (details), обновляем его в базе данных
-            # Напиши SQL-запрос UPDATE аналогично первому, используя плейсхолдеры %s
-            if new_description is not None:
-                cursor.execute("""
-                    UPDATE events 
-                    SET details = %s 
-                    WHERE name = %s AND user_id = %s;
-                """, (new_description, event_name, user_id))
-                
+            cursor.execute("""
+                UPDATE events 
+                SET name = %s, date = %s, time = %s
+                WHERE id = %s AND user_id = %s;
+            """, (new_name, new_date, new_time, event_id, user_id))
+            
             self.conn.commit()
-            logging.info(f"Событие '{event_name}' успешно отредактировано для {user_id}!")
+            logging.info(f"Запись СУБД с ID {event_id} успешно обновлена пользователем {user_id}!")
 
     def delete_event(self, user_id: int, event_name: str) -> None:
         """Метод для УДАЛЕНИЯ строки таблицы events по имени события и ID пользователя."""

@@ -1,9 +1,11 @@
 import vk_api
 import random
 import logging
-# 1. Импортируй класс time из модуля datetime вместе с date
 from datetime import date, time
 from app.calendar import Calendar
+from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+from datetime import date, time, timedelta
+import json  
 
 async def add_calendar_event_handler( 
     vk, user_id: int, date_str: str, time_str: str, text: str, calendar: Calendar 
@@ -53,6 +55,8 @@ async def register_user_handler(vk, user_id: int, calendar: Calendar) -> None:
         # Передай туда текущий user_id и сохрани результат (True или False) в переменную is_new
         is_new = calendar.register_user(user_id=user_id)
         
+        main_menu = get_main_keyboard()
+        
         # Формируем красивый текст ответа в зависимости от того, новый это пользователь или нет
         if is_new:
             reply_message = (
@@ -68,6 +72,7 @@ async def register_user_handler(vk, user_id: int, calendar: Calendar) -> None:
         vk.messages.send(
             user_id=user_id,
             message=reply_message,
+            keyboard=main_menu,
             random_id=random.randint(1, 2**31 - 1)
         )
         
@@ -159,3 +164,69 @@ async def delete_calendar_event_handler(
             message="❌ Не удалось удалить событие.",
             random_id=random.randint(1, 2**31 - 1)
         )
+
+
+def get_main_keyboard() -> str:
+    """Генерирует главную клавиатуру бота."""
+    # Параметр one_time=False означает, что клавиатура не скроется после одного нажатия
+    keyboard = VkKeyboard(one_time=False)
+    
+    # 1. Первая строчка кнопок — Регистрация (зеленая)
+    keyboard.add_button("Регистрация", color=VkKeyboardColor.POSITIVE)
+    
+    # Переходим на новую строку клавиатуры
+    keyboard.add_line()
+    
+    # 2. Вторая строчка — Создать (синяя) и Показать все (белая)
+    keyboard.add_button("Создать заметку", color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button("Показать все заметки", color=VkKeyboardColor.SECONDARY)
+    
+    keyboard.add_line()
+    
+    # 3. Третья строчка — Изменить (белая) и Удалить (красная)
+    keyboard.add_button("Изменить заметку", color=VkKeyboardColor.SECONDARY)
+    keyboard.add_button("Удалить заметку", color=VkKeyboardColor.NEGATIVE)
+    
+    # Метод get_keyboard() превращает объект клавиатуры в JSON-строку для ВК
+    return keyboard.get_keyboard()
+
+
+def get_date_keyboard() -> str:
+    """Генерирует клавиатуру для быстрого выбора даты."""
+    keyboard = VkKeyboard(one_time=False)
+    
+    # Расчитываем даты программно
+    today_date = date.today()                  # Сегодня: 2026-09-15
+    tomorrow_date = today_date + timedelta(days=1)  # Завтра: ???
+    
+    # 1. Кнопка "Сегодня". Оборачиваем словарь в json.dumps()
+    keyboard.add_button(
+        label=f"Сегодня ({today_date.strftime('%d.%m')})",
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"command": "create_event_date", "date": str(today_date)})
+    )
+    
+    # 2. Кнопка "Завтра". Тоже добавляем json.dumps()
+    keyboard.add_button(
+        label=f"Завтра ({tomorrow_date.strftime('%d.%m')})",
+        color=VkKeyboardColor.PRIMARY,
+        payload=json.dumps({"command": "create_event_date", "date": str(tomorrow_date)})
+    )
+    keyboard.add_line()
+    
+    # 3. Кнопка ручного ввода и отмены
+    keyboard.add_button("Ввести вручную", color=VkKeyboardColor.SECONDARY)
+    keyboard.add_button("↩️ Отмена", color=VkKeyboardColor.NEGATIVE)
+    
+    return keyboard.get_keyboard()
+
+async def start_create_event_handler(vk, user_id: int) -> None:
+    """Запускает процесс создания заметки и предлагает выбрать дату."""
+    date_menu = get_date_keyboard()
+    
+    vk.messages.send(
+        user_id=user_id,
+        message="📅 Шаг 1: Выберите дату проведения события с помощью кнопок или введите её вручную в формате ГГГГ-ММ-ДД:",
+        keyboard=date_menu,
+        random_id=random.randint(1, 2**31 - 1)
+    )
