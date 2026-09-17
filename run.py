@@ -1,9 +1,9 @@
 import asyncio
 import logging
 
-# Импортируем настройки и класс нашего приложения
+# Импортируем настройки и класс приложения
 from settings.config import AppSettings
-# 1. Импортируй класс Application из файла app.main
+# 1. Импортируем класс Application из файла app.main
 from app.main import Application
 
 def main():
@@ -13,11 +13,10 @@ def main():
     # Загружаем настройки из Pydantic
     settings = AppSettings()
     
-    # 2. Создай объект бота (экземпляр класса Application) и передай туда наш settings
+    # 2. Создаем объект бота
     app = Application(app_settings=settings)
     
     # 3. Запускаем асинхронную функцию run() нашего бота.
-    # Передай корутину app.run() внутрь asyncio.run()
     asyncio.run(app.run())
 
 if __name__ == "__main__":

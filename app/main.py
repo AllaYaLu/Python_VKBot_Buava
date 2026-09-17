@@ -61,7 +61,6 @@ class Application:
                         user_text = event.text.lower().strip()
 
                         # ВК передает payload в объекте event.extra_values в виде строки
-                        # Давай проверим, есть ли скрытый payload у нажатой кнопки
                         payload_data = None
                         if hasattr(event, 'extra_values') and event.extra_values.get('payload'):
                             try:
