@@ -1,23 +1,22 @@
 import asyncio
 import logging
-
-# Импортируем настройки и класс приложения
 from settings.config import AppSettings
-# 1. Импортируем класс Application из файла app.main
 from app.main import Application
 
-def main():
-    # Настраиваем вывод логов в консоль
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s]: %(message)s")
-    
-    # Загружаем настройки из Pydantic
-    settings = AppSettings()
-    
-    # 2. Создаем объект бота
-    app = Application(app_settings=settings)
-    
-    # 3. Запускаем асинхронную функцию run() нашего бота.
-    asyncio.run(app.run())
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+async def main():
+    config = AppSettings()
+    app = Application(app_settings=config)
+    try:
+        await app.run()
+    finally:
+
+        await app.application_shutdown()
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Бот остановлен пользователем.")
+

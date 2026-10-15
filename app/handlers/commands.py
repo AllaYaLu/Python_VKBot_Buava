@@ -1,232 +1,196 @@
-import vk_api
-import random
-import logging
-from datetime import date, time
-from app.calendar import Calendar
+import asyncio
+import json
+from vk_api.utils import get_random_id
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
-from datetime import date, time, timedelta
-import json  
+from sqlalchemy import select, update
+from sqlalchemy.orm import joinedload
 
-async def add_calendar_event_handler( 
-    vk, user_id: int, date_str: str, time_str: str, text: str, calendar: Calendar 
-) -> None:
+from app.models import Base, User
+from app.core.users.constants import RolesEnum
+from app.core.orders.models import Order, OrderedProduct
+from app.core.orders.constants import OrderStatusEnum
+from app.core.orders.exceptions import ActiveOrderExists
+from app.handlers.helpers import build_order_buttons, format_order_content, format_order_contents_for_waiter
+
+class BotHandler:
+    def __init__(self, command_text: str, handler_func, role: RolesEnum = None):
+        self.command_text = command_text
+        self.handler_func = handler_func
+        self.role = role
+
+def get_keyboard_by_role(role: RolesEnum):
+    """Генерирует надежную клавиатуру без смайликов, которую ВК откроет на 100%"""
+    keyboard = VkKeyboard(one_time=False)
+    if role == RolesEnum.waiter:
+        keyboard.add_button("заказы в работе", color=VkKeyboardColor.PRIMARY)
+    else:
+        keyboard.add_button("сделать заказ", color=VkKeyboardColor.POSITIVE)
+    return keyboard.get_keyboard()
+
+def get_keyboard_by_role_raw(role_str: str):
+    """Вспомогательная функция для main.py"""
+    role = RolesEnum.waiter if role_str == "waiter" else RolesEnum.customer
+    return get_keyboard_by_role(role)
+
+async def customer_start_handler(vk, user_id: int, services) -> None:
+    """Приветствие обычного посетителя"""
+    repo = services["user_repo"]
+    await repo.create_user_if_not_exists(user_id=user_id)
+    await asyncio.to_thread(
+        vk.messages.send, user_id=user_id, 
+        message="Добро пожаловать в наше кафе-мороженое! Используйте кнопку меню ниже:", 
+        keyboard=get_keyboard_by_role(RolesEnum.customer), random_id=get_random_id()
+    )
+
+async def waiter_start_handler(vk, user_id: int, services) -> None:
+    """Приветствие официанта с гарантированным выводом кнопок"""
+    await asyncio.to_thread(
+        vk.messages.send, user_id=user_id, 
+        message="С возвращением на смену! Панель управления активна.", 
+        keyboard=get_keyboard_by_role(RolesEnum.waiter), 
+        random_id=get_random_id()
+    )
+
+async def change_role_dev_handler(vk, user_id: int, new_role_str: str, app_instance) -> None:
+    """Хэндлер быстрой смены ролей с жестким обновлением кэша памяти приложения"""
+    target_role = RolesEnum.waiter if "официант" in new_role_str else RolesEnum.customer
+
+    async with app_instance.database.session() as session:
+        stmt = update(User).where(User.vk_id == user_id).values(role=target_role)
+        await session.execute(stmt)
+            
+    if target_role == RolesEnum.waiter:
+        app_instance._roles[RolesEnum.waiter].add(user_id)
+    else:
+        app_instance._roles[RolesEnum.waiter].discard(user_id)
+
+    await asyncio.to_thread(
+        vk.messages.send, user_id=user_id, 
+        message=f"Роль успешно изменена на: {target_role.value}!", 
+        keyboard=get_keyboard_by_role(target_role), random_id=get_random_id()
+    )
+
+async def create_order_handler(vk, user_id: int, services) -> None:
+    """Точка входа в заказ (Шаг 2)"""
+    order_service = services["order_service"]
+    product_service = services["product_service"]
+    
     try:
-        # Парсинг даты и времени (это у тебя уже написано)
-        event_date = date.fromisoformat(date_str)
-        event_time = time.fromisoformat(time_str)
-        
-        # Так как пользователь пишет: событие 2026-09-14 15:00 Купить кофе
-        # Текст "Купить кофе" мы запишем как имя события, 
-        # а детали (event_details) пока сделаем пустой строкой или продублируем текст
-        event_name = text
-        event_details = f"Заметка создана через ВК бота." 
-
-        # ИСПРАВЛЕННЫЙ ВЫЗОВ: передаем все 5 обязательных параметров!
-        calendar.create_event(
-            user_id=user_id,
-            event_name=event_name,
-            event_date=event_date,
-            event_time=event_time,
-            event_details=event_details
+        order_id = await order_service.create_order(user_id=user_id)
+        products = await product_service.list_products()
+        await asyncio.to_thread(
+            vk.messages.send, user_id=user_id,
+            message="🛒 Добавьте блюдо или напиток в заказ:\n(В вашей корзине пока пусто)",
+            keyboard=build_order_buttons(order_id, products), random_id=get_random_id()
         )
-
-        vk.messages.send(
-            user_id=user_id,
-            message=f"📅 Событие '{event_name}' успешно сохранено в БД на {event_date} в {event_time}!",
-            random_id=random.randint(1, 2**31 - 1)
-        )
-    except ValueError:
-        vk.messages.send(
-            user_id=user_id,
-            message="❌ Ошибка! Формат: событие ГГГГ-ММ-ДД ЧЧ:ММ Текст (например: событие 2026-09-14 15:00 Кофе)",
-            random_id=random.randint(1, 2**31 - 1)
-        )
-
-
-# (Все предыдущие импорты и хэндлеры остаются без изменений вверху!)
-
-async def register_user_handler(vk, user_id: int, calendar: Calendar) -> None:
-    """
-    Обработчик для команды 'регистрация'.
-    Регистрирует пользователя в базе данных и отправляет красивый ответ.
-    """
-    try:
-        # 1. Вызови метод register_user у объекта calendar.
-        # Передай туда текущий user_id и сохрани результат (True или False) в переменную is_new
-        is_new = calendar.register_user(user_id=user_id)
+    except ActiveOrderExists:
+        active_order = await order_service.get_active_order_for_user(user_id)
+        products = await product_service.list_products()
+        cart_text = format_order_content(active_order)
         
-        main_menu = get_main_keyboard()
-        
-        # Формируем красивый текст ответа в зависимости от того, новый это пользователь или нет
-        if is_new:
-            reply_message = (
-                "🎉 Вы успешно зарегистрировались в Боте-Календаре!\n\n"
-                "Теперь вам доступны все функции многопользовательского режима. "
-                "Вы можете создавать свои личные события и управлять ими!"
-            )
+        if active_order.status == OrderStatusEnum.ordered:
+            message = f"У вас уже есть активный заказ №{active_order.id}, ожидайте сборки официантом!\n\n{cart_text}"
+            await asyncio.to_thread(vk.messages.send, user_id=user_id, message=message, random_id=get_random_id())
         else:
-            reply_message = "ℹ️ Вы уже зарегистрированы в системе! Ваш личный календарь полностью готов к работе."
-            
-        # 2. Отправляем ответ пользователю в ВК.
-        # Впиши правильные параметры в метод send: user_id, message и random_id
-        vk.messages.send(
-            user_id=user_id,
-            message=reply_message,
-            keyboard=main_menu,
-            random_id=random.randint(1, 2**31 - 1)
-        )
-        
-        logging.info(f"Обработана регистрация для пользователя {user_id}")
-        
-    except Exception as e:
-        logging.error(f"Ошибка в обработчике регистрации: {e}")
-        vk.messages.send(
-            user_id=user_id,
-            message="❌ Произошла ошибка при регистрации. Пожалуйста, попробуйте позже.",
-            random_id=random.randint(1, 2**31 - 1)
-        )
+            message = f"У вас остался незавершенный черновик заказа №{active_order.id}.\nВы можете продолжить выбор:"
+            await asyncio.to_thread(vk.messages.send, user_id=user_id, message=message, keyboard=build_order_buttons(active_order.id, products), random_id=get_random_id())
 
+async def add_item_handler(vk, user_id: int, payload_data: dict, services) -> None:
+    """Добавление выбранной позиции в корзину (Шаг 3)"""
+    order_service = services["order_service"]
+    product_service = services["product_service"]
+    
+    order_id = payload_data["order_id"]
+    product_id = payload_data["product_id"]
+    
+    await order_service.add_product_to_order(order_id, product_id)
+    updated_order = await order_service.get_order_by_id(order_id)
+    products = await product_service.list_products()
+    
+    await asyncio.to_thread(
+        vk.messages.send, user_id=user_id,
+        message=format_order_content(updated_order),
+        keyboard=build_order_buttons(order_id, products), random_id=get_random_id()
+    )
 
-async def edit_calendar_event_handler(
-    vk, user_id: int, payload: str, calendar: Calendar
-) -> None:
-    """Обработчик для изменения события с защитой от ошибок парсинга."""
-    try:
-        # 1. Разделяем строку по вертикальной черте
-        parts = payload.split("|")
-        
-        # Проверяем, что пользователь передал хотя бы имя события
-        if not parts or not parts[0].strip():
-            raise ValueError("Имя события не может быть пустым")
-            
-        event_name = parts[0].strip()
-        new_date = None
-        new_description = None
-        
-        # 2. Если есть вторая часть, аккуратно извлекаем дату
-        if len(parts) > 1 and parts[1].strip():
-            new_date = date.fromisoformat(parts[1].strip())
-            
-        # 3. Если есть третья часть, извлекаем описание
-        if len(parts) > 2 and parts[2].strip():
-            new_description = parts[2].strip()
-            
-        # Вызываем метод класса базы данных
-        calendar.edit_event(
-            user_id=user_id,
-            event_name=event_name,
-            new_date=new_date,
-            new_description=new_description
-        )
-        
-        vk.messages.send(
-            user_id=user_id,
-            message=f"✅ Событие '{event_name}' успешно обновлено!",
-            random_id=random.randint(1, 2**31 - 1)
-        )
-    except Exception as e:
-        # Важно! Этот лог выведет настоящую причину падения в терминал VS Code,
-        # чтобы мы не гадали, почему сработал блок except
-        logging.error(f" [КРИТИЧЕСКАЯ ОШИБКА ПАРСИНГА ИЗМЕНЕНИЯ]: {e}")
-        
-        vk.messages.send(
-            user_id=user_id,
-            message="❌ Ошибка синтаксиса! Шаблон: изменить Название | ГГГГ-ММ-ДД | Описание",
-            random_id=random.randint(1, 2**31 - 1)
-        )
-
-
-async def delete_calendar_event_handler(
-    vk, user_id: int, event_name: str, calendar: Calendar
-) -> None:
-    """Обработчик для удаления события."""
-    try:
-        # Очищаем имя события от случайных пробелов по краям
-        clean_name = event_name.strip()
-        
-        if not clean_name:
-            raise ValueError("Имя события для удаления не может быть пустым")
-        
-        # Передаем параметры строго по именам, как написано в твоем классе Calendar
-        calendar.delete_event(user_id=user_id, event_name=clean_name)
-        
-        vk.messages.send(
-            user_id=user_id,
-            message=f"🗑️ Событие '{clean_name}' успешно удалено из вашего календаря!",
-            random_id=random.randint(1, 2**31 - 1)
-        )
-    except Exception as e:
-        # Теперь, если что-то сломается, в терминале VS Code ОБЯЗАТЕЛЬНО появится эта строчка
-        logging.error(f"❌ [ОШИБКА В ХЭНДЛЕРЕ УДАЛЕНИЯ]: {e}")
-        
-        vk.messages.send(
-            user_id=user_id,
-            message="❌ Не удалось удалить событие.",
-            random_id=random.randint(1, 2**31 - 1)
-        )
-
-
-def get_main_keyboard() -> str:
-    """Генерирует главную клавиатуру бота."""
-    # Параметр one_time=False означает, что клавиатура не скроется после одного нажатия
-    keyboard = VkKeyboard(one_time=False)
+async def finish_order_handler(vk, user_id: int, payload_data: dict, services) -> None:
+    """Передача готового заказа официантам (Шаг 4)"""
+    order_service = services["order_service"]
+    user_repo = services["user_repo"]
+    order_id = payload_data["order_id"]
     
-    # 1. Первая строчка кнопок — Регистрация (зеленая)
-    keyboard.add_button("Регистрация", color=VkKeyboardColor.POSITIVE)
+    await order_service.send_order_to_waiters(order_id)
+    order = await order_service.get_order_by_id(order_id)
     
-    # Переходим на новую строку клавиатуры
-    keyboard.add_line()
-    
-    # 2. Вторая строчка — Создать (синяя) и Показать все (белая)
-    keyboard.add_button("Создать заметку", color=VkKeyboardColor.PRIMARY)
-    keyboard.add_button("Показать все заметки", color=VkKeyboardColor.SECONDARY)
-    
-    keyboard.add_line()
-    
-    # 3. Третья строчка — Изменить (белая) и Удалить (красная)
-    keyboard.add_button("Изменить заметку", color=VkKeyboardColor.SECONDARY)
-    keyboard.add_button("Удалить заметку", color=VkKeyboardColor.NEGATIVE)
-    
-    # Метод get_keyboard() превращает объект клавиатуры в JSON-строку для ВК
-    return keyboard.get_keyboard()
-
-
-def get_date_keyboard() -> str:
-    """Генерирует клавиатуру для быстрого выбора даты."""
-    keyboard = VkKeyboard(one_time=False)
-    
-    # Расчитываем даты программно
-    today_date = date.today()                  # Сегодня: 2026-09-15
-    tomorrow_date = today_date + timedelta(days=1)  # Завтра: ???
-    
-    # 1. Кнопка "Сегодня". Оборачиваем словарь в json.dumps()
-    keyboard.add_button(
-        label=f"Сегодня ({today_date.strftime('%d.%m')})",
-        color=VkKeyboardColor.PRIMARY,
-        payload=json.dumps({"command": "create_event_date", "date": str(today_date)})
+    await asyncio.to_thread(
+        vk.messages.send, user_id=user_id,
+        message="Заказ был передан нашим официантам, ожидайте в ближайшее время!",
+        keyboard=get_keyboard_by_role(RolesEnum.customer), random_id=get_random_id()
     )
     
-    # 2. Кнопка "Завтра". Тоже добавляем json.dumps()
-    keyboard.add_button(
-        label=f"Завтра ({tomorrow_date.strftime('%d.%m')})",
-        color=VkKeyboardColor.PRIMARY,
-        payload=json.dumps({"command": "create_event_date", "date": str(tomorrow_date)})
-    )
-    keyboard.add_line()
+    waiter_ids = await user_repo.get_waiter_user_ids()
+    waiter_msg = format_order_contents_for_waiter(order)
     
-    # 3. Кнопка ручного ввода и отмены
-    keyboard.add_button("Ввести вручную", color=VkKeyboardColor.SECONDARY)
-    keyboard.add_button("↩️ Отмена", color=VkKeyboardColor.NEGATIVE)
-    
-    return keyboard.get_keyboard()
+    for waiter_id in waiter_ids:
+        waiter_kb = VkKeyboard(inline=True)
+        waiter_payload = {"action": "waiter_finish", "order_id": order_id}
+        waiter_kb.add_button(f"Заказ {order_id} выдан", color=VkKeyboardColor.POSITIVE, payload=json.dumps(waiter_payload))
+        try:
+            await asyncio.to_thread(vk.messages.send, user_id=waiter_id, message=waiter_msg, keyboard=waiter_kb.get_keyboard(), random_id=get_random_id())
+        except Exception:
+            pass
 
-async def start_create_event_handler(vk, user_id: int) -> None:
-    """Запускает процесс создания заметки и предлагает выбрать дату."""
-    date_menu = get_date_keyboard()
+async def display_pending_orders_handler(vk, user_id: int, services) -> None:
+    """Хэндлер отображения активных заказов для роли официанта"""
+    order_service = services["order_service"]
     
-    vk.messages.send(
-        user_id=user_id,
-        message="📅 Шаг 1: Выберите дату проведения события с помощью кнопок или введите её вручную в формате ГГГГ-ММ-ДД:",
-        keyboard=date_menu,
-        random_id=random.randint(1, 2**31 - 1)
-    )
+    async with order_service.repository.database.session() as session:
+        query = select(Order).where(Order.status == OrderStatusEnum.ordered).order_by(Order.id).options(
+            joinedload(Order.products).joinedload(OrderedProduct.product)
+        )
+        result = await session.execute(query)
+        pending_orders = result.scalars().unique().all()
+
+    if not pending_orders:
+        await asyncio.to_thread(
+            vk.messages.send, user_id=user_id, 
+            message="Нет активных заказов в очереди. Все клиенты довольны!", 
+            keyboard=get_keyboard_by_role(RolesEnum.waiter), random_id=get_random_id()
+        )
+        return
+
+    lines = []
+    inline_keyboard = VkKeyboard(inline=True)
+    for index, order in enumerate(pending_orders):
+        order_text = f"Заказ №{order.id} (Клиент: ://vk.com{order.user_id})\n"
+        for op in order.products:
+            order_text += f"• {op.product.name} — {op.amount} шт.\n"
+        lines.append(order_text)
+        
+        inline_keyboard.add_button(f"Выдать {order.id}", color=VkKeyboardColor.POSITIVE, payload=json.dumps({"action": "waiter_finish", "order_id": order.id}))
+        if (index + 1) % 2 == 0 and index < len(pending_orders) - 1:
+            inline_keyboard.add_line()
+            
+    message = "Список активных заказов в работе:\n\n" + "\n\n".join(lines) + "\nКликните по кнопке ниже, чтобы выдать заказ:"
+    await asyncio.to_thread(vk.messages.send, user_id=user_id, message=message, keyboard=inline_keyboard.get_keyboard(), random_id=get_random_id())
+
+async def waiter_finish_order_handler(vk, waiter_id: int, payload_data: dict, services) -> None:
+    """Официант закрывает заказ (Шаг 5)"""
+    order_service = services["order_service"]
+    order_id = payload_data["order_id"]
+    
+    order = await order_service.get_order_by_id(order_id)
+    if order and order.status != OrderStatusEnum.done:
+        await order_service.mark_order_done(order_id)
+        await asyncio.to_thread(vk.messages.send, user_id=waiter_id, message=f"Заказ №{order_id} успешно переведен в статус: ВЫДАН.", random_id=get_random_id())
+        try:
+            await asyncio.to_thread(vk.messages.send, user_id=order.user_id, message=f"Ваш заказ №{order_id} успешно приготовлен и выдан гостю! Приятного аппетита!", random_id=get_random_id())
+        except Exception:
+            pass
+
+HANDLERS = [
+    BotHandler("регистрация", customer_start_handler, role=RolesEnum.customer),
+    BotHandler("старт", customer_start_handler, role=RolesEnum.customer),
+    BotHandler("старт", waiter_start_handler, role=RolesEnum.waiter),
+    BotHandler("заказы в работе", display_pending_orders_handler, role=RolesEnum.waiter),
+]

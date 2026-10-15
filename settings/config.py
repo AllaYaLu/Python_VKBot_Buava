@@ -4,18 +4,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class AppSettings(BaseSettings):
     """
-    Класс конфигурации для бота-календаря.
+    Класс конфигурации для бота-кафе.
+    Все значения автоматически подтягиваются из файла .env по именам переменных.
     """
-    # Токен ВК (тип SecretStr)
-    VK_API_KEY: SecretStr = SecretStr("secret")
+    VK_API_KEY: SecretStr
 
-    # Настройки для подключения к БД PostgreSQL (типы str и SecretStr)
-    DB_HOST: str = "localhost"
-    DB_NAME: str = "calendar_bot"
-    DB_USER: str = "postgres"
-    DB_PASSWORD: SecretStr = SecretStr("secret")
+    DB_HOST: str
+    DB_NAME: str
+    DB_USER: str
+    DB_PASSWORD: SecretStr
 
-    # Настройка пути к файлу .env
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(__file__), "../.env")
     )
+
+    ADMIN_INTERFACE_PORT: int
+    ADMIN_SECRET_KEY: SecretStr
+    ADMIN_LOGIN: SecretStr
+    ADMIN_PASSWORD: SecretStr
